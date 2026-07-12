@@ -1,0 +1,21 @@
+name: Windows compatibility
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-powershell:
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Run Windows PowerShell 5.1 self-test
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File .\claude-watch.ps1 -SelfTest
