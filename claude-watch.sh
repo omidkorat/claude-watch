@@ -27,7 +27,7 @@ claude_pids() {
 }
 
 vpn_status() {
-    local connected_service nwi_interfaces default_interface
+    local connected_service nwi_interfaces routed_tunnels
 
     connected_service=$(scutil --nc list 2>/dev/null |
         sed -nE '/\(Connected\)/s/.*"([^"]+)".*/\1/p' |
@@ -51,9 +51,24 @@ vpn_status() {
         return 0
     fi
 
-    default_interface=$(route -n get default 2>/dev/null | awk '/interface:/ {print $2; exit}')
-    if [[ "$default_interface" == utun* || "$default_interface" == ppp* || "$default_interface" == ipsec* ]]; then
-        printf 'Connected (default route: %s)' "$default_interface"
+    # OpenVPN clients such as VyprVPN may keep the normal default route while
+    # sending traffic through two half-default routes (0/1 and 128/1).
+    routed_tunnels=$(netstat -rn -f inet 2>/dev/null | awk '
+        /^Destination/ {
+            for (i = 1; i <= NF; i++)
+                if ($i == "Netif") interface_column = i
+            next
+        }
+        interface_column &&
+        ($1 == "default" || $1 == "0/1" || $1 == "0.0.0.0/1" ||
+         $1 == "128/1" || $1 == "128.0/1" || $1 == "128.0.0.0/1") &&
+        $interface_column ~ /^(utun|tun|tap|ppp|ipsec)[0-9]*$/ {
+            print $interface_column
+        }
+    ' | sort -u | paste -sd ',' - | sed 's/,/, /g')
+
+    if [[ -n "$routed_tunnels" ]]; then
+        printf 'Connected (routed tunnel: %s)' "$routed_tunnels"
         return 0
     fi
 

@@ -56,7 +56,7 @@ Claude Watch checks, in order:
 
 1. Connected VPN services reported by `scutil --nc list`.
 2. Active `utun` tunnel interfaces reported by `scutil --nwi`.
-3. Default routes using `utun`, `ppp`, or `ipsec` interfaces.
+3. Full-tunnel routes using `utun`, `tun`, `tap`, `ppp`, or `ipsec` interfaces, including OpenVPN's `0/1` plus `128/1` routing pattern used by VyprVPN.
 
 Some Apple services and third-party networking tools may also use tunnel interfaces. Review the script's behavior for your setup before relying on it as a security control.
 
