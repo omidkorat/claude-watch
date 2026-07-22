@@ -20,7 +20,9 @@ cleanup() {
 trap cleanup INT TERM HUP
 
 claude_pids() {
-    pgrep -ix 'Claude' 2>/dev/null || true
+    # Match process names only, including Claude helpers, without scanning
+    # unrelated command-line arguments that happen to contain "claude".
+    pgrep -i '^Claude($|[ -])' 2>/dev/null || true
 }
 
 vpn_status() {
