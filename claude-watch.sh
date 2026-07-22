@@ -20,10 +20,9 @@ cleanup() {
 trap cleanup INT TERM HUP
 
 claude_pids() {
-    ps -axo pid=,command= | awk -v self="$$" '
-        $1 != self && tolower($0) ~ /claude/ &&
-        $0 !~ /[a]wk -v self=/ { print $1 }
-    ' | sort -u
+    # Match process names only, including Claude helpers, without scanning
+    # unrelated command-line arguments that happen to contain "claude".
+    pgrep -i '^Claude($|[ -])' 2>/dev/null || true
 }
 
 vpn_status() {
