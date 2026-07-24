@@ -16,6 +16,10 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Run Windows PowerShell 5.1 self-test
+      - name: Run Windows PowerShell 5.1 self-test (claude-watch)
         shell: powershell
         run: powershell -NoProfile -ExecutionPolicy Bypass -File .\claude-watch.ps1 -SelfTest
+
+      - name: Run Windows PowerShell 5.1 self-test (code-watch)
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File .\code-watch.ps1 -SelfTest
