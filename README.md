@@ -70,6 +70,45 @@ The PowerShell version checks, in order:
 
 The Windows version includes a non-destructive `-SelfTest` mode. GitHub Actions runs it on Windows PowerShell 5.1 for every pull request and every push to `main`.
 
+## VS Code VPN kill-switch (code-watch)
+
+`code-watch.sh` (macOS) and `code-watch.ps1` (Windows) do the same VPN detection as above, but instead of killing processes they **freeze the entire VS Code process tree** — the app, every helper process, and anything an extension spawned under it (language servers, integrated-terminal shells, CLIs) — with `SIGSTOP`/`NtSuspendProcess` whenever the VPN drops, and wake it back up with `SIGCONT`/`NtResumeProcess` once the VPN reconnects. No windows or unsaved buffers are lost; VS Code is simply unresponsive while paused.
+
+> [!WARNING]
+> Pausing the whole process tree also freezes anything running inside VS Code, including integrated terminals and other extensions (e.g. Claude Code CLI sessions) — you won't be able to interact with them until the VPN comes back.
+
+Run standalone for testing:
+
+```bash
+./code-watch.sh                       # interactive, like claude-watch.sh
+./code-watch.sh --daemon /tmp/status  # headless, writes KEY=VALUE status lines
+```
+
+```powershell
+powershell -File .\code-watch.ps1                                   # interactive
+powershell -File .\code-watch.ps1 -Daemon -StatusFile C:\temp\status # headless
+```
+
+In daemon mode, drop `pause`, `resume`, or `stop` into `<status-file>.cmd` to control it externally.
+
+### VS Code extension
+
+`vscode-extension/` wraps these scripts as a VS Code extension, so the kill-switch is armed automatically every time VS Code opens instead of depending on someone remembering to run a script in a terminal.
+
+It launches the appropriate script as a detached background daemon on startup and surfaces status in a dedicated **Code Watch** view in the Activity Bar: VPN state, tunnel interface, public IP (what a leak would actually expose, not just the tunnel's local address), frozen-process count, and last-check time. The Activity Bar icon gets a badge only while VS Code is actually paused, so there's something to notice without opening the panel. An optional status-bar indicator is also available if you keep your status bar visible. Commands: `Code Watch: Start/Stop Monitoring`, `Pause/Resume Now`.
+
+Because the extension host is itself part of the frozen process tree, it can't show a live countdown while paused — see `vscode-extension/README.md` for the details and workaround (watching from a separate terminal outside VS Code).
+
+Build it with:
+
+```bash
+cd vscode-extension
+npm install
+npm run build
+```
+
+Then run it from the Extension Development Host (`F5` in VS Code) or package it with `vsce package`.
+
 ## License
 
 [MIT](LICENSE)
