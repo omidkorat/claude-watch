@@ -70,6 +70,29 @@ The PowerShell version checks, in order:
 
 The Windows version includes a non-destructive `-SelfTest` mode. GitHub Actions runs it on Windows PowerShell 5.1 for every pull request and every push to `main`.
 
+### Finder launcher
+
+macOS users can also start Claude Watch directly from Finder using the included `Claude Watch.command` launcher.
+
+After cloning the repository, make the launcher executable once:
+
+```bash
+chmod +x "Claude Watch.command"
+```
+
+You can then double-click `Claude Watch.command` in Finder to start Claude Watch in Terminal.
+
+The launcher:
+
+- Automatically locates the `claude-watch.sh` script when used from the repository.
+- Checks the repository for updates using a fast-forward-only Git pull before launching.
+- Never overwrites local uncommitted changes.
+- Falls back to the existing local version if the update check fails.
+- Supports repository paths containing spaces.
+
+> [!NOTE]
+> If macOS reports that the launcher cannot be opened because you do not have permission, run the `chmod +x "Claude Watch.command"` command above once and try again.
+
 ## License
 
 [MIT](LICENSE)
