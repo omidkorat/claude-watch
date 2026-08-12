@@ -80,7 +80,11 @@ After cloning the repository, make the launcher executable once:
 chmod +x "Claude Watch.command"
 ```
 
-You can then double-click `Claude Watch.command` in Finder to start Claude Watch in Terminal.
+### Finder launcher
+
+macOS users can start Claude Watch directly from Finder using the included `Claude Watch.command` launcher.
+
+After cloning the repository, simply double-click `Claude Watch.command` in Finder to start Claude Watch in Terminal.
 
 The launcher:
 
@@ -89,9 +93,6 @@ The launcher:
 - Never overwrites local uncommitted changes.
 - Falls back to the existing local version if the update check fails.
 - Supports repository paths containing spaces.
-
-> [!NOTE]
-> If macOS reports that the launcher cannot be opened because you do not have permission, run the `chmod +x "Claude Watch.command"` command above once and try again.
 
 ## License
 
