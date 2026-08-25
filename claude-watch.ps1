@@ -6,6 +6,8 @@ param(
 )
 
 $RefreshSeconds = 2
+$RequiredTimeZone = 'Eastern Standard Time'
+$HomeTimeZone = 'Iran Standard Time'
 $VpnAdapterPattern = '(?i)(vpn|wireguard|wintun|openvpn|tailscale|nordlynx|proton|mullvad|anyconnect|globalprotect|fortinet|tap[-_ ]|tun[-_ ])'
 
 function Test-ClaudeProcess {
@@ -18,8 +20,8 @@ function Test-ClaudeProcess {
         return $false
     }
 
-    return (([string]$Process.Name -match '(?i)claude') -or
-        ([string]$Process.CommandLine -match '(?i)claude'))
+    $processName = [IO.Path]::GetFileNameWithoutExtension([string]$Process.Name)
+    return ($processName -match '(?i)^claude($|[ -])')
 }
 
 function Get-ClaudeProcesses {
@@ -29,7 +31,7 @@ function Get-ClaudeProcesses {
     }
     catch {
         return @(Get-Process -ErrorAction SilentlyContinue |
-            Where-Object { $_.Id -ne $PID -and $_.ProcessName -match '(?i)claude' } |
+            Where-Object { $_.Id -ne $PID -and $_.ProcessName -match '(?i)^claude($|[ -])' } |
             ForEach-Object {
                 [pscustomobject]@{
                     ProcessId  = $_.Id
@@ -37,6 +39,48 @@ function Get-ClaudeProcesses {
                     CommandLine = $null
                 }
             })
+    }
+}
+
+function Get-TargetTimeZone {
+    param([AllowNull()][string]$VpnStatus)
+
+    if ($VpnStatus) {
+        return $RequiredTimeZone
+    }
+
+    return $HomeTimeZone
+}
+
+function Set-ClaudeWatchTimeZone {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$TimeZoneId
+    )
+
+    try {
+        $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+        $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+        $isAdministrator = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+
+        if ($isAdministrator) {
+            Set-TimeZone -Id $TimeZoneId -ErrorAction Stop
+        }
+        else {
+            $escapedId = $TimeZoneId.Replace("'", "''")
+            $command = "Set-TimeZone -Id '$escapedId' -ErrorAction Stop"
+            $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+            $process = Start-Process -FilePath powershell.exe -Verb RunAs -Wait -PassThru `
+                -ArgumentList "-NoProfile -EncodedCommand $encodedCommand" -ErrorAction Stop
+            if ($process.ExitCode -ne 0) {
+                return $false
+            }
+        }
+
+        return ((Get-TimeZone -ErrorAction Stop).Id -eq $TimeZoneId)
+    }
+    catch {
+        return $false
     }
 }
 
@@ -130,7 +174,13 @@ function Show-Status {
     param(
         [object[]]$ClaudeProcesses,
         [string]$VpnStatus,
-        [bool]$AutoKilled
+        [bool]$AutoKilled,
+        [string]$AutoKillReason,
+        [string]$CurrentTimeZone,
+        [string]$TargetTimeZone,
+        [bool]$TimeZoneSynced,
+        [bool]$TimeZoneChangeFailed,
+        [string]$TimeZoneChangedTo
     )
 
     [Console]::SetCursorPosition(0, 0)
@@ -141,7 +191,7 @@ function Show-Status {
     if ($ClaudeProcesses.Count -eq 0) {
         Write-StatusLine 'No Claude processes are running.' Green
     }
-    elseif ($VpnStatus) {
+    elseif ($VpnStatus -and $CurrentTimeZone -eq $RequiredTimeZone) {
         Write-StatusLine ('CLAUDE IS RUNNING: {0} process(es)' -f $ClaudeProcesses.Count) Yellow
     }
     else {
@@ -149,7 +199,7 @@ function Show-Status {
     }
 
     if ($AutoKilled) {
-        Write-StatusLine 'Claude was automatically stopped because the VPN is disconnected.' Red
+        Write-StatusLine ('Claude was automatically stopped because {0}.' -f $AutoKillReason) Red
     }
     else {
         Write-StatusLine ''
@@ -164,7 +214,33 @@ function Show-Status {
     }
 
     Write-StatusLine ''
-    Write-StatusLine 'Options: [K] Kill all Claude processes   [X] Exit'
+    if ($TimeZoneSynced) {
+        Write-StatusLine ('TIME ZONE: {0}' -f $CurrentTimeZone) Green
+    }
+    else {
+        Write-StatusLine ('TIME ZONE: {0} - expected {1}' -f $CurrentTimeZone, $TargetTimeZone) Red
+    }
+
+    if ($VpnStatus -and $CurrentTimeZone -eq $RequiredTimeZone) {
+        if ($TimeZoneChangedTo -eq $RequiredTimeZone) {
+            Write-StatusLine 'READY: Time zone changed to New York. You can open Claude now.' Green
+        }
+        else {
+            Write-StatusLine 'READY: VPN and New York time zone confirmed. You can open Claude.' Green
+        }
+    }
+    elseif (-not $VpnStatus -and $TimeZoneSynced) {
+        Write-StatusLine 'SAFE: Time zone is Tehran. Claude remains blocked until VPN connects.' Red
+    }
+    elseif ($TimeZoneChangeFailed) {
+        Write-StatusLine 'Time zone change failed. Claude remains blocked; press [T] to retry.' Red
+    }
+    else {
+        Write-StatusLine ''
+    }
+
+    Write-StatusLine ''
+    Write-StatusLine 'Options: [K] Kill Claude   [T] Sync time zone   [X] Exit'
     Write-StatusLine 'Monitor keeps refreshing automatically.'
 }
 
@@ -178,6 +254,11 @@ function Invoke-SelfTest {
         ProcessId  = 10002
         Name       = 'node.exe'
         CommandLine = 'node.exe C:\tools\claude-helper.js'
+    }
+    $helperSample = [pscustomobject]@{
+        ProcessId  = 10004
+        Name       = 'Claude Helper.exe'
+        CommandLine = 'C:\Program Files\Claude\Claude Helper.exe'
     }
     $otherSample = [pscustomobject]@{
         ProcessId  = 10003
@@ -194,10 +275,15 @@ function Invoke-SelfTest {
     }
 
     if (-not (Test-ClaudeProcess $claudeSample)) { throw 'Claude name detection failed.' }
-    if (-not (Test-ClaudeProcess $commandSample)) { throw 'Claude command-line detection failed.' }
+    if (Test-ClaudeProcess $commandSample) { throw 'Command-line false-positive rejection failed.' }
+    if (-not (Test-ClaudeProcess $helperSample)) { throw 'Claude helper detection failed.' }
     if (Test-ClaudeProcess $otherSample) { throw 'Unrelated process detection failed.' }
     if (-not (Test-VpnAdapter $vpnSample)) { throw 'VPN adapter detection failed.' }
     if (Test-VpnAdapter $ethernetSample) { throw 'Unrelated adapter detection failed.' }
+    if ((Get-TargetTimeZone 'Connected: Test VPN') -ne $RequiredTimeZone) { throw 'VPN time-zone target failed.' }
+    if ((Get-TargetTimeZone $null) -ne $HomeTimeZone) { throw 'Disconnected time-zone target failed.' }
+    if (-not (Get-TimeZone -ListAvailable | Where-Object { $_.Id -eq $RequiredTimeZone })) { throw 'New York time-zone ID is unavailable.' }
+    if (-not (Get-TimeZone -ListAvailable | Where-Object { $_.Id -eq $HomeTimeZone })) { throw 'Tehran time-zone ID is unavailable.' }
 
     $null = @(Get-ClaudeProcesses)
     $null = Get-VpnStatus
@@ -211,6 +297,9 @@ if ($SelfTest) {
 
 $originalCursorVisible = [Console]::CursorVisible
 $exitRequested = $false
+$timeZoneAttemptedFor = $null
+$timeZoneChangedTo = $null
+$timeZoneChangeFailed = $false
 
 try {
     [Console]::Clear()
@@ -220,14 +309,47 @@ try {
         $claudeProcesses = @(Get-ClaudeProcesses)
         $vpnStatus = Get-VpnStatus
         $autoKilled = $false
+        $autoKillReason = $null
+        $currentTimeZone = (Get-TimeZone).Id
+        $targetTimeZone = Get-TargetTimeZone $vpnStatus
+        $timeZoneSynced = ($currentTimeZone -eq $targetTimeZone)
 
-        if ($claudeProcesses.Count -gt 0 -and -not $vpnStatus) {
+        if ($timeZoneSynced) {
+            $timeZoneAttemptedFor = $null
+            $timeZoneChangeFailed = $false
+        }
+
+        if ($claudeProcesses.Count -gt 0 -and
+            ((-not $vpnStatus) -or $currentTimeZone -ne $RequiredTimeZone)) {
             Stop-ClaudeProcesses
             $autoKilled = $true
+            if (-not $vpnStatus) {
+                $autoKillReason = 'the VPN is disconnected'
+            }
+            else {
+                $autoKillReason = "the time zone is $currentTimeZone, not $RequiredTimeZone"
+            }
             $claudeProcesses = @(Get-ClaudeProcesses)
         }
 
-        Show-Status -ClaudeProcesses $claudeProcesses -VpnStatus $vpnStatus -AutoKilled $autoKilled
+        if (-not $timeZoneSynced -and $timeZoneAttemptedFor -ne $targetTimeZone) {
+            $timeZoneAttemptedFor = $targetTimeZone
+            if (Set-ClaudeWatchTimeZone $targetTimeZone) {
+                $currentTimeZone = (Get-TimeZone).Id
+                $timeZoneSynced = $true
+                $timeZoneChangedTo = $targetTimeZone
+                $timeZoneChangeFailed = $false
+            }
+            else {
+                $currentTimeZone = (Get-TimeZone).Id
+                $timeZoneChangeFailed = $true
+            }
+        }
+
+        Show-Status -ClaudeProcesses $claudeProcesses -VpnStatus $vpnStatus -AutoKilled $autoKilled `
+            -AutoKillReason $autoKillReason -CurrentTimeZone $currentTimeZone `
+            -TargetTimeZone $targetTimeZone -TimeZoneSynced $timeZoneSynced `
+            -TimeZoneChangeFailed $timeZoneChangeFailed -TimeZoneChangedTo $timeZoneChangedTo
 
         $deadline = (Get-Date).AddSeconds($RefreshSeconds)
         :waitLoop while ((Get-Date) -lt $deadline) {
@@ -236,6 +358,11 @@ try {
                 switch ($key) {
                     'K' {
                         Stop-ClaudeProcesses
+                        break waitLoop
+                    }
+                    'T' {
+                        $timeZoneAttemptedFor = $null
+                        $timeZoneChangedTo = $null
                         break waitLoop
                     }
                     'X' {

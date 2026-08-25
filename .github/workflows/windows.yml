@@ -1,4 +1,4 @@
-name: Windows compatibility
+name: Compatibility
 
 on:
   push:
@@ -10,6 +10,17 @@ permissions:
   contents: read
 
 jobs:
+  macos-bash:
+    runs-on: macos-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Validate and self-test macOS Bash script
+        run: |
+          bash -n ./claude-watch.sh
+          bash ./claude-watch.sh --self-test
+
   windows-powershell:
     runs-on: windows-latest
     steps:
