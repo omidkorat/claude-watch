@@ -1,18 +1,20 @@
 # Claude Watch
 
-Claude Watch is a lightweight, interactive macOS and Windows terminal monitor for Claude processes and VPN connectivity.
+Claude Watch is a lightweight, interactive macOS and Windows terminal monitor for Claude processes, VPN connectivity, and safe time-zone switching.
 
 ## Features
 
 - Refreshes every two seconds without filling Terminal scrollback.
-- Shows the number of running processes whose command contains `claude`.
+- Shows the number of running Claude processes using process-name matching.
 - Detects system-managed VPNs and common third-party VPN adapters.
-- Automatically stops every matching Claude process when no VPN is detected.
+- Allows Claude only when a VPN is connected and the time zone is New York.
+- Automatically switches to New York time while the VPN is connected and Tehran time when it disconnects.
+- Automatically stops every matching Claude process when either safety condition is not met.
 - Lets you manually stop all matching processes by pressing `k`.
 - Exits cleanly with `x`, `q`, or `Control-C`.
 
 > [!WARNING]
-> Claude Watch intentionally terminates processes automatically whenever its VPN checks report no connection. Because matching is case-insensitive and command-line based, it may also stop other processes whose command contains `claude`.
+> Claude Watch intentionally terminates Claude processes whenever its VPN or time-zone safety checks fail. Changing the system time zone requires macOS administrator authentication or Windows UAC approval.
 
 ## macOS
 
@@ -42,13 +44,25 @@ The execution-policy option applies only to that invocation and does not change 
 ## Controls
 
 - Press `k` to stop every detected Claude process.
+- Press `t` to retry synchronizing the time zone with the VPN state.
 - Press `x` or `q` to exit.
 
 ## Status colors
 
-- Green: VPN connected, or no Claude processes detected.
-- Yellow: Claude is running while a VPN is connected.
-- Red: VPN disconnected, auto-kill armed, or an automatic stop was triggered.
+- Green: a system condition is correctly synchronized.
+- Yellow: Claude is running while both VPN and New York time are confirmed.
+- Red: Claude is blocked, a safety condition failed, or an automatic stop was triggered.
+
+## Time-zone safety
+
+Claude Watch keeps the system in one of two explicit states:
+
+| VPN | Required time zone | Claude |
+| --- | --- | --- |
+| Connected | New York (`America/New_York` on macOS; `Eastern Standard Time` on Windows) | Allowed |
+| Disconnected | Tehran (`Asia/Tehran` on macOS; `Iran Standard Time` on Windows) | Blocked |
+
+Claude is stopped before an inconsistent time zone is corrected. If administrator authorization is declined or the change cannot be verified, Claude remains blocked and the monitor offers a manual retry with `t`.
 
 ## VPN detection on macOS
 
