@@ -29,6 +29,12 @@ chmod +x claude-watch.sh
 ./claude-watch.sh
 ```
 
+To disable time-zone protection for the entire run without any administrator prompt:
+
+```bash
+./claude-watch.sh --no-timezone
+```
+
 ## Windows
 
 Requirements: Windows 10 or 11 and Windows PowerShell 5.1 or later.
@@ -37,6 +43,12 @@ Clone the repository, open PowerShell in its folder, and run:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\claude-watch.ps1
+```
+
+To disable time-zone protection for the entire run without UAC prompts:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\claude-watch.ps1 -NoTimeZone
 ```
 
 The execution-policy option applies only to that invocation and does not change the system policy.
@@ -62,7 +74,9 @@ Claude Watch keeps the system in one of two explicit states:
 | Connected | New York (`America/New_York` on macOS; `Eastern Standard Time` on Windows) | Allowed |
 | Disconnected | Tehran (`Asia/Tehran` on macOS; `Iran Standard Time` on Windows) | Blocked |
 
-Claude is stopped before an inconsistent time zone is corrected. If administrator authorization is declined or the change cannot be verified, Claude remains blocked and the monitor offers a manual retry with `t`.
+Reading the current time zone never requires administrator access. If it already matches the VPN state, Claude Watch continues without requesting elevation. Only when a change is needed does Claude Watch explain why elevated access is required and offer three choices: change it, skip time-zone protection for the current session without elevation, or exit.
+
+Claude is stopped before an approved inconsistent time zone is corrected. If administrator authorization is declined or the change cannot be verified, Claude remains blocked and the monitor offers a manual retry with `t`. Choosing skip disables only the time-zone rules; VPN protection remains active.
 
 ## VPN detection on macOS
 

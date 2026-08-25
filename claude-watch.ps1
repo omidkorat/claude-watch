@@ -2,7 +2,8 @@
 
 [CmdletBinding()]
 param(
-    [switch]$SelfTest
+    [switch]$SelfTest,
+    [switch]$NoTimeZone
 )
 
 $RefreshSeconds = 2
@@ -81,6 +82,47 @@ function Set-ClaudeWatchTimeZone {
     }
     catch {
         return $false
+    }
+}
+
+function Request-TimeZoneAction {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$CurrentTimeZone,
+
+        [Parameter(Mandatory = $true)]
+        [string]$TargetTimeZone
+    )
+
+    try {
+        [Console]::CursorVisible = $true
+        [Console]::Clear()
+        Write-Host 'Time-zone protection found a mismatch.' -ForegroundColor Yellow
+        Write-Host ''
+        Write-Host "Current time zone:  $CurrentTimeZone"
+        Write-Host "Required time zone: $TargetTimeZone"
+        Write-Host ''
+        Write-Host 'Reading the current time zone does not require administrator access.'
+        Write-Host 'Windows requires administrator approval only to change this system-wide setting.'
+        Write-Host ''
+        Write-Host '[C] Change the time zone (Windows UAC approval required)'
+        Write-Host '[S] Skip time-zone protection for this session (no elevation)'
+        Write-Host '[X] Exit Claude Watch'
+        Write-Host ''
+        $choice = Read-Host 'Choice [C/S/X]'
+    }
+    catch {
+        $choice = 'S'
+    }
+    finally {
+        [Console]::Clear()
+        [Console]::CursorVisible = $false
+    }
+
+    switch ($choice) {
+        { $_ -match '(?i)^c$' } { return 'Change' }
+        { $_ -match '(?i)^(x|q)$' } { return 'Exit' }
+        default { return 'Skip' }
     }
 }
 
@@ -180,7 +222,8 @@ function Show-Status {
         [string]$TargetTimeZone,
         [bool]$TimeZoneSynced,
         [bool]$TimeZoneChangeFailed,
-        [string]$TimeZoneChangedTo
+        [string]$TimeZoneChangedTo,
+        [bool]$TimeZoneEnforced
     )
 
     [Console]::SetCursorPosition(0, 0)
@@ -191,7 +234,7 @@ function Show-Status {
     if ($ClaudeProcesses.Count -eq 0) {
         Write-StatusLine 'No Claude processes are running.' Green
     }
-    elseif ($VpnStatus -and $CurrentTimeZone -eq $RequiredTimeZone) {
+    elseif ($VpnStatus -and ((-not $TimeZoneEnforced) -or $CurrentTimeZone -eq $RequiredTimeZone)) {
         Write-StatusLine ('CLAUDE IS RUNNING: {0} process(es)' -f $ClaudeProcesses.Count) Yellow
     }
     else {
@@ -214,20 +257,29 @@ function Show-Status {
     }
 
     Write-StatusLine ''
-    if ($TimeZoneSynced) {
+    if (-not $TimeZoneEnforced) {
+        Write-StatusLine ('TIME ZONE: {0} - protection skipped for this session' -f $CurrentTimeZone) Yellow
+    }
+    elseif ($TimeZoneSynced) {
         Write-StatusLine ('TIME ZONE: {0}' -f $CurrentTimeZone) Green
     }
     else {
         Write-StatusLine ('TIME ZONE: {0} - expected {1}' -f $CurrentTimeZone, $TargetTimeZone) Red
     }
 
-    if ($VpnStatus -and $CurrentTimeZone -eq $RequiredTimeZone) {
+    if ($VpnStatus -and -not $TimeZoneEnforced) {
+        Write-StatusLine 'READY: VPN confirmed. Time-zone protection is disabled. You can open Claude.' Green
+    }
+    elseif ($VpnStatus -and $CurrentTimeZone -eq $RequiredTimeZone) {
         if ($TimeZoneChangedTo -eq $RequiredTimeZone) {
             Write-StatusLine 'READY: Time zone changed to New York. You can open Claude now.' Green
         }
         else {
             Write-StatusLine 'READY: VPN and New York time zone confirmed. You can open Claude.' Green
         }
+    }
+    elseif (-not $VpnStatus -and -not $TimeZoneEnforced) {
+        Write-StatusLine 'SAFE: VPN is disconnected. Claude remains blocked.' Red
     }
     elseif (-not $VpnStatus -and $TimeZoneSynced) {
         Write-StatusLine 'SAFE: Time zone is Tehran. Claude remains blocked until VPN connects.' Red
@@ -240,7 +292,7 @@ function Show-Status {
     }
 
     Write-StatusLine ''
-    Write-StatusLine 'Options: [K] Kill Claude   [T] Sync time zone   [X] Exit'
+    Write-StatusLine 'Options: [K] Kill Claude   [T] Enable/sync time zone   [X] Exit'
     Write-StatusLine 'Monitor keeps refreshing automatically.'
 }
 
@@ -300,6 +352,7 @@ $exitRequested = $false
 $timeZoneAttemptedFor = $null
 $timeZoneChangedTo = $null
 $timeZoneChangeFailed = $false
+$timeZoneEnforcement = -not $NoTimeZone
 
 try {
     [Console]::Clear()
@@ -319,37 +372,63 @@ try {
             $timeZoneChangeFailed = $false
         }
 
-        if ($claudeProcesses.Count -gt 0 -and
-            ((-not $vpnStatus) -or $currentTimeZone -ne $RequiredTimeZone)) {
+        if ($claudeProcesses.Count -gt 0 -and -not $vpnStatus) {
             Stop-ClaudeProcesses
             $autoKilled = $true
-            if (-not $vpnStatus) {
-                $autoKillReason = 'the VPN is disconnected'
-            }
-            else {
-                $autoKillReason = "the time zone is $currentTimeZone, not $RequiredTimeZone"
-            }
+            $autoKillReason = 'the VPN is disconnected'
             $claudeProcesses = @(Get-ClaudeProcesses)
         }
 
-        if (-not $timeZoneSynced -and $timeZoneAttemptedFor -ne $targetTimeZone) {
+        if ($timeZoneEnforcement -and -not $timeZoneSynced -and $timeZoneAttemptedFor -ne $targetTimeZone) {
             $timeZoneAttemptedFor = $targetTimeZone
-            if (Set-ClaudeWatchTimeZone $targetTimeZone) {
-                $currentTimeZone = (Get-TimeZone).Id
-                $timeZoneSynced = $true
-                $timeZoneChangedTo = $targetTimeZone
-                $timeZoneChangeFailed = $false
+            $timeZoneAction = Request-TimeZoneAction -CurrentTimeZone $currentTimeZone -TargetTimeZone $targetTimeZone
+            switch ($timeZoneAction) {
+                'Skip' {
+                    $timeZoneEnforcement = $false
+                    $timeZoneChangeFailed = $false
+                }
+                'Exit' {
+                    $exitRequested = $true
+                }
+                'Change' {
+                    if ($claudeProcesses.Count -gt 0) {
+                        Stop-ClaudeProcesses
+                        $autoKilled = $true
+                        $autoKillReason = "time-zone protection requires $RequiredTimeZone"
+                        $claudeProcesses = @(Get-ClaudeProcesses)
+                    }
+
+                    if (Set-ClaudeWatchTimeZone $targetTimeZone) {
+                        $currentTimeZone = (Get-TimeZone).Id
+                        $timeZoneSynced = $true
+                        $timeZoneChangedTo = $targetTimeZone
+                        $timeZoneChangeFailed = $false
+                    }
+                    else {
+                        $currentTimeZone = (Get-TimeZone).Id
+                        $timeZoneChangeFailed = $true
+                    }
+                }
             }
-            else {
-                $currentTimeZone = (Get-TimeZone).Id
-                $timeZoneChangeFailed = $true
-            }
+        }
+
+        if ($exitRequested) {
+            continue
+        }
+
+        if ($claudeProcesses.Count -gt 0 -and $vpnStatus -and $timeZoneEnforcement -and
+            $currentTimeZone -ne $RequiredTimeZone) {
+            Stop-ClaudeProcesses
+            $autoKilled = $true
+            $autoKillReason = "the time zone is $currentTimeZone, not $RequiredTimeZone"
+            $claudeProcesses = @(Get-ClaudeProcesses)
         }
 
         Show-Status -ClaudeProcesses $claudeProcesses -VpnStatus $vpnStatus -AutoKilled $autoKilled `
             -AutoKillReason $autoKillReason -CurrentTimeZone $currentTimeZone `
             -TargetTimeZone $targetTimeZone -TimeZoneSynced $timeZoneSynced `
-            -TimeZoneChangeFailed $timeZoneChangeFailed -TimeZoneChangedTo $timeZoneChangedTo
+            -TimeZoneChangeFailed $timeZoneChangeFailed -TimeZoneChangedTo $timeZoneChangedTo `
+            -TimeZoneEnforced $timeZoneEnforcement
 
         $deadline = (Get-Date).AddSeconds($RefreshSeconds)
         :waitLoop while ((Get-Date) -lt $deadline) {
@@ -361,6 +440,7 @@ try {
                         break waitLoop
                     }
                     'T' {
+                        $timeZoneEnforcement = $true
                         $timeZoneAttemptedFor = $null
                         $timeZoneChangedTo = $null
                         break waitLoop
