@@ -116,6 +116,37 @@ set_timezone() {
     [[ $change_status -eq 0 && "$(get_timezone)" == "$target_timezone" ]]
 }
 
+request_timezone_action() {
+    local target_timezone="$1"
+    local target_name="$2"
+    local current_timezone="$3"
+    local choice
+
+    printf '\033[?25h\033[?1049l\n'
+    printf 'Time-zone protection found a mismatch.\n\n'
+    printf 'Current time zone:  %s\n' "${current_timezone:-Unknown}"
+    printf 'Required time zone: %s (%s)\n\n' "$target_name" "$target_timezone"
+    printf 'Reading the current time zone does not require administrator access.\n'
+    printf 'macOS requires administrator access only to change this system-wide setting.\n\n'
+    printf '[c] Change the time zone (administrator password required)\n'
+    printf '[s] Skip time-zone protection for this session (no sudo)\n'
+    printf '[x] Exit Claude Watch\n\n'
+
+    if [[ -t 0 ]]; then
+        IFS= read -r -p 'Choice [c/s/x]: ' choice
+    else
+        choice='s'
+        printf 'No interactive terminal detected; skipping time-zone protection for this session.\n'
+    fi
+
+    printf '\033[?1049h\033[2J\033[H\033[?25l'
+    case "$choice" in
+        c|C) timezone_action='change' ;;
+        x|X|q|Q) timezone_action='exit' ;;
+        *) timezone_action='skip' ;;
+    esac
+}
+
 kill_claude() {
     local pids
     pids=$(claude_pids)
@@ -147,6 +178,11 @@ invoke_self_test() {
 if [[ "${1:-}" == '--self-test' ]]; then
     invoke_self_test
     exit $?
+fi
+
+timezone_enforcement=true
+if [[ "${1:-}" == '--no-timezone' ]]; then
+    timezone_enforcement=false
 fi
 
 printf '\033[?1049h\033[2J\033[H\033[?25l'
@@ -185,35 +221,59 @@ while true; do
         timezone_change_failed=false
     fi
 
-    # Claude is allowed only when both the VPN and New York time zone are ready.
-    if [[ -n "$pids" && ("$vpn_connected" == false || "$timezone_ready" == false) ]]; then
+    # A disconnected VPN always blocks Claude, regardless of time-zone preference.
+    if [[ -n "$pids" && "$vpn_connected" == false ]]; then
         kill_claude
         auto_killed=true
-        if [[ "$vpn_connected" == false ]]; then
-            auto_kill_reason='the VPN is disconnected'
-        else
-            auto_kill_reason="the time zone is ${timezone:-unknown}, not $REQUIRED_TIMEZONE"
-        fi
+        auto_kill_reason='the VPN is disconnected'
         pids=$(claude_pids)
     fi
 
-    # Keep New York time while protected by VPN, and Tehran time otherwise.
-    if [[ "$timezone_synced" == false && "$timezone_attempted_for" != "$target_timezone" ]]; then
+    # Ask before requesting elevated access. Skipping disables this protection
+    # for the current session and guarantees that sudo will not be called.
+    if [[ "$timezone_enforcement" == true && "$timezone_synced" == false && "$timezone_attempted_for" != "$target_timezone" ]]; then
         timezone_attempted_for="$target_timezone"
-        if set_timezone "$target_timezone" "$target_timezone_name"; then
-            timezone=$(get_timezone)
-            timezone_synced=true
-            timezone_changed_to="$target_timezone"
-            timezone_change_failed=false
-            if [[ "$timezone" == "$REQUIRED_TIMEZONE" ]]; then
-                timezone_ready=true
-            else
-                timezone_ready=false
-            fi
-        else
-            timezone=$(get_timezone)
-            timezone_change_failed=true
-        fi
+        request_timezone_action "$target_timezone" "$target_timezone_name" "$timezone"
+        case "$timezone_action" in
+            skip)
+                timezone_enforcement=false
+                timezone_change_failed=false
+                ;;
+            exit)
+                cleanup
+                ;;
+            change)
+                if [[ -n "$pids" ]]; then
+                    kill_claude
+                    auto_killed=true
+                    auto_kill_reason="time-zone protection requires $REQUIRED_TIMEZONE"
+                    pids=$(claude_pids)
+                fi
+                if set_timezone "$target_timezone" "$target_timezone_name"; then
+                    timezone=$(get_timezone)
+                    timezone_synced=true
+                    timezone_changed_to="$target_timezone"
+                    timezone_change_failed=false
+                    if [[ "$timezone" == "$REQUIRED_TIMEZONE" ]]; then
+                        timezone_ready=true
+                    else
+                        timezone_ready=false
+                    fi
+                else
+                    timezone=$(get_timezone)
+                    timezone_change_failed=true
+                fi
+                ;;
+        esac
+    fi
+
+    # If protected time-zone correction failed, newly opened Claude processes
+    # remain blocked until the user retries or skips this protection.
+    if [[ -n "$pids" && "$vpn_connected" == true && "$timezone_enforcement" == true && "$timezone_ready" == false ]]; then
+        kill_claude
+        auto_killed=true
+        auto_kill_reason="the time zone is ${timezone:-unknown}, not $REQUIRED_TIMEZONE"
+        pids=$(claude_pids)
     fi
 
     printf '\033[2K%b\n' "${BOLD}${CYAN}macOS Claude + VPN + Time Zone Monitor${RESET}"
@@ -222,7 +282,7 @@ while true; do
 
     if [[ -n "$pids" ]]; then
         process_count=$(printf '%s\n' "$pids" | wc -l | tr -d ' ')
-        if [[ "$vpn_connected" == true && "$timezone_ready" == true ]]; then
+        if [[ "$vpn_connected" == true && ("$timezone_enforcement" == false || "$timezone_ready" == true) ]]; then
             claude_color="$YELLOW"
         else
             claude_color="$RED"
@@ -248,18 +308,24 @@ while true; do
         printf '\033[2K%b\n' "${RED}${BOLD}VPN: Not connected — Claude auto-kill is armed${RESET}"
     fi
 
-    if [[ "$timezone_synced" == true ]]; then
+    if [[ "$timezone_enforcement" == false ]]; then
+        printf '\033[2K%b\n' "${YELLOW}${BOLD}TIME ZONE: ${timezone:-Unknown} — protection skipped for this session${RESET}"
+    elif [[ "$timezone_synced" == true ]]; then
         printf '\033[2K%b\n' "${GREEN}${BOLD}TIME ZONE: ${timezone}${RESET}"
     else
         printf '\033[2K%b\n' "${RED}${BOLD}TIME ZONE: ${timezone:-Unknown} — expected ${target_timezone}${RESET}"
     fi
 
-    if [[ "$vpn_connected" == true && "$timezone_ready" == true ]]; then
+    if [[ "$vpn_connected" == true && "$timezone_enforcement" == false ]]; then
+        printf '\033[2K%b\n' "${GREEN}${BOLD}READY: VPN confirmed. Time-zone protection is disabled. You can open Claude.${RESET}"
+    elif [[ "$vpn_connected" == true && "$timezone_ready" == true ]]; then
         if [[ "$timezone_changed_to" == "$REQUIRED_TIMEZONE" ]]; then
             printf '\033[2K%b\n' "${GREEN}${BOLD}READY: Time zone changed to New York. You can open Claude now.${RESET}"
         else
             printf '\033[2K%b\n' "${GREEN}${BOLD}READY: VPN and New York time zone confirmed. You can open Claude.${RESET}"
         fi
+    elif [[ "$vpn_connected" == false && "$timezone_enforcement" == false ]]; then
+        printf '\033[2K%b\n' "${RED}${BOLD}SAFE: VPN is disconnected. Claude remains blocked.${RESET}"
     elif [[ "$vpn_connected" == false && "$timezone_synced" == true ]]; then
         printf '\033[2K%b\n' "${RED}${BOLD}SAFE: Time zone is Tehran. Claude remains blocked until VPN connects.${RESET}"
     elif [[ "$timezone_change_failed" == true ]]; then
@@ -269,7 +335,7 @@ while true; do
     fi
 
     printf '\033[2K\n'
-    printf '\033[2K%s\n' 'Options: [k] Kill Claude   [t] Sync time zone   [x] Exit'
+    printf '\033[2K%s\n' 'Options: [k] Kill Claude   [t] Enable/sync time zone   [x] Exit'
     printf '\033[2K%s' 'Choice (monitor keeps refreshing): '
     printf '\033[J'
 
@@ -283,6 +349,7 @@ while true; do
         case "$choice" in
             k|K) kill_claude ;;
             t|T)
+                timezone_enforcement=true
                 timezone_attempted_for=''
                 timezone_changed_to=''
                 ;;
