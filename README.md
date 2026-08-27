@@ -88,6 +88,8 @@ Claude Watch checks, in order:
 
 Some Apple services and third-party networking tools may also use tunnel interfaces. Review the script's behavior for your setup before relying on it as a security control.
 
+To prevent a brief macOS network refresh from flipping the time zone, Claude Watch requires three consecutive VPN misses before changing to the disconnected time-zone state. Claude is still blocked immediately on the first miss, and a short grace period after an approved time-zone change prevents an immediate reversal.
+
 ## VPN detection on Windows
 
 The PowerShell version checks, in order:

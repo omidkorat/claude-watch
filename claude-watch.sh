@@ -12,6 +12,8 @@ RESET='\033[0m'
 REFRESH_SECONDS=2
 REQUIRED_TIMEZONE='America/New_York'
 HOME_TIMEZONE='Asia/Tehran'
+VPN_DISCONNECT_CONFIRMATIONS=3
+VPN_POST_CHANGE_GRACE_SECONDS=10
 
 cleanup() {
     printf '\033[?25h\033[?1049l%bMonitor stopped.%b\n' "$CYAN" "$RESET"
@@ -94,22 +96,45 @@ target_timezone_for_vpn() {
     fi
 }
 
+update_vpn_state() {
+    local raw_connected="$1"
+
+    if [[ "$raw_connected" == true ]]; then
+        vpn_state='connected'
+        vpn_misses=0
+        return
+    fi
+
+    # A time-zone change can briefly refresh macOS network state. Keep the
+    # previous stable state during this grace period, but Claude is still
+    # blocked immediately by the raw VPN check in the main loop.
+    if (( SECONDS < vpn_grace_until )); then
+        vpn_misses=0
+        return
+    fi
+
+    vpn_misses=$((vpn_misses + 1))
+    if (( vpn_misses >= VPN_DISCONNECT_CONFIRMATIONS )); then
+        vpn_state='disconnected'
+    fi
+}
+
 set_timezone() {
     local target_timezone="$1"
     local target_name="$2"
-    local change_status
+    local change_status change_output
 
     # Leave the alternate screen so macOS can show sudo's password prompt.
     printf '\033[?25h\033[?1049l\n'
     printf 'The network state requires the %s time zone.\n' "$target_name"
     printf 'Enter your Mac administrator password to change it to %s.\n' "$target_timezone"
 
-    sudo /usr/sbin/systemsetup -settimezone "$target_timezone"
+    change_output=$(sudo /usr/sbin/systemsetup -settimezone "$target_timezone" 2>&1)
     change_status=$?
 
-    if [[ $change_status -eq 0 ]]; then
-        sudo /usr/sbin/systemsetup -setnetworktimeserver time.apple.com >/dev/null 2>&1 || true
-        sudo /usr/sbin/systemsetup -setusingnetworktime on >/dev/null 2>&1 || true
+    if [[ $change_status -ne 0 ]]; then
+        printf 'Time-zone change failed.\n'
+        [[ -n "$change_output" ]] && printf '%s\n' "$change_output"
     fi
 
     printf '\033[?1049h\033[2J\033[H\033[?25l'
@@ -172,6 +197,29 @@ invoke_self_test() {
     command -v pgrep >/dev/null 2>&1 || return 1
     command -v scutil >/dev/null 2>&1 || return 1
     command -v systemsetup >/dev/null 2>&1 || return 1
+
+    vpn_state='unknown'
+    vpn_misses=0
+    vpn_grace_until=0
+    update_vpn_state false
+    [[ "$vpn_state" == 'unknown' ]] || return 1
+    update_vpn_state false
+    [[ "$vpn_state" == 'unknown' ]] || return 1
+    update_vpn_state false
+    [[ "$vpn_state" == 'disconnected' ]] || return 1
+    update_vpn_state true
+    [[ "$vpn_state" == 'connected' && $vpn_misses -eq 0 ]] || return 1
+    update_vpn_state false
+    update_vpn_state false
+    [[ "$vpn_state" == 'connected' ]] || return 1
+    update_vpn_state false
+    [[ "$vpn_state" == 'disconnected' ]] || return 1
+    vpn_state='connected'
+    vpn_misses=0
+    vpn_grace_until=$((SECONDS + 60))
+    update_vpn_state false
+    [[ "$vpn_state" == 'connected' && $vpn_misses -eq 0 ]] || return 1
+
     printf 'Claude Watch macOS self-test passed.\n'
 }
 
@@ -190,32 +238,52 @@ printf '\033[?1049h\033[2J\033[H\033[?25l'
 timezone_attempted_for=''
 timezone_changed_to=''
 timezone_change_failed=false
+vpn_state='unknown'
+vpn_misses=0
+vpn_grace_until=0
 
 while true; do
     printf '\033[H'
 
     pids=$(claude_pids)
     vpn=''
+    raw_vpn_connected=false
     vpn_connected=false
     auto_killed=false
     auto_kill_reason=''
     timezone=$(get_timezone)
     timezone_ready=false
     timezone_synced=false
+    timezone_target_known=false
 
     if [[ "$timezone" == "$REQUIRED_TIMEZONE" ]]; then
         timezone_ready=true
     fi
 
     if vpn=$(vpn_status); then
+        raw_vpn_connected=true
         vpn_connected=true
-        target_timezone_name='New York'
-    else
-        target_timezone_name='Tehran'
     fi
-    target_timezone=$(target_timezone_for_vpn "$vpn_connected")
+    update_vpn_state "$raw_vpn_connected"
 
-    if [[ "$timezone" == "$target_timezone" ]]; then
+    case "$vpn_state" in
+        connected)
+            target_timezone="$REQUIRED_TIMEZONE"
+            target_timezone_name='New York'
+            timezone_target_known=true
+            ;;
+        disconnected)
+            target_timezone="$HOME_TIMEZONE"
+            target_timezone_name='Tehran'
+            timezone_target_known=true
+            ;;
+        *)
+            target_timezone=''
+            target_timezone_name=''
+            ;;
+    esac
+
+    if [[ "$timezone_target_known" == true && "$timezone" == "$target_timezone" ]]; then
         timezone_synced=true
         timezone_attempted_for=''
         timezone_change_failed=false
@@ -231,7 +299,7 @@ while true; do
 
     # Ask before requesting elevated access. Skipping disables this protection
     # for the current session and guarantees that sudo will not be called.
-    if [[ "$timezone_enforcement" == true && "$timezone_synced" == false && "$timezone_attempted_for" != "$target_timezone" ]]; then
+    if [[ "$timezone_enforcement" == true && "$timezone_target_known" == true && "$timezone_synced" == false && "$timezone_attempted_for" != "$target_timezone" ]]; then
         timezone_attempted_for="$target_timezone"
         request_timezone_action "$target_timezone" "$target_timezone_name" "$timezone"
         case "$timezone_action" in
@@ -254,6 +322,7 @@ while true; do
                     timezone_synced=true
                     timezone_changed_to="$target_timezone"
                     timezone_change_failed=false
+                    vpn_grace_until=$((SECONDS + VPN_POST_CHANGE_GRACE_SECONDS))
                     if [[ "$timezone" == "$REQUIRED_TIMEZONE" ]]; then
                         timezone_ready=true
                     else
@@ -302,14 +371,18 @@ while true; do
     fi
 
     printf '\033[2K\n'
-    if [[ "$vpn_connected" == true ]]; then
+    if [[ "$raw_vpn_connected" == true ]]; then
         printf '\033[2K%b\n' "${GREEN}${BOLD}VPN: ${vpn}${RESET}"
+    elif [[ "$vpn_state" != 'disconnected' ]]; then
+        printf '\033[2K%b\n' "${YELLOW}${BOLD}VPN: Rechecking (${vpn_misses}/${VPN_DISCONNECT_CONFIRMATIONS}) — Claude blocked; time zone unchanged${RESET}"
     else
         printf '\033[2K%b\n' "${RED}${BOLD}VPN: Not connected — Claude auto-kill is armed${RESET}"
     fi
 
     if [[ "$timezone_enforcement" == false ]]; then
         printf '\033[2K%b\n' "${YELLOW}${BOLD}TIME ZONE: ${timezone:-Unknown} — protection skipped for this session${RESET}"
+    elif [[ "$timezone_target_known" == false ]]; then
+        printf '\033[2K%b\n' "${YELLOW}${BOLD}TIME ZONE: ${timezone:-Unknown} — waiting for stable VPN state${RESET}"
     elif [[ "$timezone_synced" == true ]]; then
         printf '\033[2K%b\n' "${GREEN}${BOLD}TIME ZONE: ${timezone}${RESET}"
     else
