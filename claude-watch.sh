@@ -88,12 +88,26 @@ get_timezone() {
     esac
 }
 
-target_timezone_for_vpn() {
-    if [[ "$1" == true ]]; then
-        printf '%s' "$REQUIRED_TIMEZONE"
-    else
-        printf '%s' "$HOME_TIMEZONE"
-    fi
+target_timezone_for_state() {
+    local stable_vpn_state="$1"
+    local hold_iran="$2"
+    local claude_running="$3"
+
+    case "$stable_vpn_state" in
+        disconnected)
+            printf '%s' "$HOME_TIMEZONE"
+            ;;
+        connected)
+            if [[ "$hold_iran" == true && "$claude_running" == false ]]; then
+                printf '%s' "$HOME_TIMEZONE"
+            else
+                printf '%s' "$REQUIRED_TIMEZONE"
+            fi
+            ;;
+        *)
+            return 1
+            ;;
+    esac
 }
 
 update_vpn_state() {
@@ -189,8 +203,11 @@ kill_claude() {
 }
 
 invoke_self_test() {
-    [[ "$(target_timezone_for_vpn true)" == "$REQUIRED_TIMEZONE" ]] || return 1
-    [[ "$(target_timezone_for_vpn false)" == "$HOME_TIMEZONE" ]] || return 1
+    [[ "$(target_timezone_for_state connected false false)" == "$REQUIRED_TIMEZONE" ]] || return 1
+    [[ "$(target_timezone_for_state connected true false)" == "$HOME_TIMEZONE" ]] || return 1
+    [[ "$(target_timezone_for_state connected true true)" == "$REQUIRED_TIMEZONE" ]] || return 1
+    [[ "$(target_timezone_for_state disconnected false false)" == "$HOME_TIMEZONE" ]] || return 1
+    target_timezone_for_state unknown false false >/dev/null 2>&1 && return 1
     [[ -n "$(get_timezone)" ]] || return 1
     [[ -e "/usr/share/zoneinfo/$REQUIRED_TIMEZONE" ]] || return 1
     [[ -e "/usr/share/zoneinfo/$HOME_TIMEZONE" ]] || return 1
@@ -241,6 +258,7 @@ timezone_change_failed=false
 vpn_state='unknown'
 vpn_misses=0
 vpn_grace_until=0
+iran_hold=false
 
 while true; do
     printf '\033[H'
@@ -266,22 +284,23 @@ while true; do
     fi
     update_vpn_state "$raw_vpn_connected"
 
-    case "$vpn_state" in
-        connected)
-            target_timezone="$REQUIRED_TIMEZONE"
-            target_timezone_name='New York'
-            timezone_target_known=true
-            ;;
-        disconnected)
-            target_timezone="$HOME_TIMEZONE"
+    if [[ -n "$pids" ]]; then
+        iran_hold=false
+    fi
+
+    claude_running=false
+    [[ -n "$pids" ]] && claude_running=true
+    if target_timezone=$(target_timezone_for_state "$vpn_state" "$iran_hold" "$claude_running"); then
+        timezone_target_known=true
+        if [[ "$target_timezone" == "$HOME_TIMEZONE" ]]; then
             target_timezone_name='Tehran'
-            timezone_target_known=true
-            ;;
-        *)
-            target_timezone=''
-            target_timezone_name=''
-            ;;
-    esac
+        else
+            target_timezone_name='New York'
+        fi
+    else
+        target_timezone=''
+        target_timezone_name=''
+    fi
 
     if [[ "$timezone_target_known" == true && "$timezone" == "$target_timezone" ]]; then
         timezone_synced=true
@@ -389,7 +408,9 @@ while true; do
         printf '\033[2K%b\n' "${RED}${BOLD}TIME ZONE: ${timezone:-Unknown} — expected ${target_timezone}${RESET}"
     fi
 
-    if [[ "$vpn_connected" == true && "$timezone_enforcement" == false ]]; then
+    if [[ "$vpn_connected" == true && "$timezone_enforcement" == true && "$iran_hold" == true && "$timezone_synced" == true && -z "$pids" ]]; then
+        printf '\033[2K%b\n' "${YELLOW}${BOLD}STANDBY: Iran time is restored. Press [t] to prepare New York before opening Claude.${RESET}"
+    elif [[ "$vpn_connected" == true && "$timezone_enforcement" == false ]]; then
         printf '\033[2K%b\n' "${GREEN}${BOLD}READY: VPN confirmed. Time-zone protection is disabled. You can open Claude.${RESET}"
     elif [[ "$vpn_connected" == true && "$timezone_ready" == true ]]; then
         if [[ "$timezone_changed_to" == "$REQUIRED_TIMEZONE" ]]; then
@@ -408,7 +429,11 @@ while true; do
     fi
 
     printf '\033[2K\n'
-    printf '\033[2K%s\n' 'Options: [k] Kill Claude   [t] Enable/sync time zone   [x] Exit'
+    if [[ -z "$pids" ]]; then
+        printf '\033[2K%s\n' 'Options: [k] Kill   [t] Prepare New York   [i] Restore Iran   [x] Exit'
+    else
+        printf '\033[2K%s\n' 'Options: [k] Kill   [t] Prepare New York   [x] Exit'
+    fi
     printf '\033[2K%s' 'Choice (monitor keeps refreshing): '
     printf '\033[J'
 
@@ -423,8 +448,17 @@ while true; do
             k|K) kill_claude ;;
             t|T)
                 timezone_enforcement=true
+                iran_hold=false
                 timezone_attempted_for=''
                 timezone_changed_to=''
+                ;;
+            i|I)
+                if [[ -z "$pids" ]]; then
+                    timezone_enforcement=true
+                    iran_hold=true
+                    timezone_attempted_for=''
+                    timezone_changed_to=''
+                fi
                 ;;
             x|X|q|Q) cleanup ;;
         esac

@@ -56,7 +56,8 @@ The execution-policy option applies only to that invocation and does not change 
 ## Controls
 
 - Press `k` to stop every detected Claude process.
-- Press `t` to retry synchronizing the time zone with the VPN state.
+- Press `t` to prepare New York time before opening Claude or retry synchronization.
+- Press `i` to restore Iran time while Claude is closed.
 - Press `x` or `q` to exit.
 
 ## Status colors
@@ -77,6 +78,8 @@ Claude Watch keeps the system in one of two explicit states:
 Reading the current time zone never requires administrator access. If it already matches the VPN state, Claude Watch continues without requesting elevation. Only when a change is needed does Claude Watch explain why elevated access is required and offer three choices: change it, skip time-zone protection for the current session without elevation, or exit.
 
 Claude is stopped before an approved inconsistent time zone is corrected. If administrator authorization is declined or the change cannot be verified, Claude remains blocked and the monitor offers a manual retry with `t`. Choosing skip disables only the time-zone rules; VPN protection remains active.
+
+When Claude is closed, pressing `i` restores the Tehran/Iran time zone even if the VPN remains connected. This state is held instead of being immediately changed back. Press `t` to prepare New York time before opening Claude. If Claude starts while Iran time is being held, Claude Watch releases the hold and runs the normal New York safety flow.
 
 ## VPN detection on macOS
 

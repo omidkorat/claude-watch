@@ -44,13 +44,21 @@ function Get-ClaudeProcesses {
 }
 
 function Get-TargetTimeZone {
-    param([AllowNull()][string]$VpnStatus)
+    param(
+        [AllowNull()][string]$VpnStatus,
+        [bool]$IranHold = $false,
+        [bool]$ClaudeRunning = $false
+    )
 
-    if ($VpnStatus) {
-        return $RequiredTimeZone
+    if (-not $VpnStatus) {
+        return $HomeTimeZone
     }
 
-    return $HomeTimeZone
+    if ($IranHold -and -not $ClaudeRunning) {
+        return $HomeTimeZone
+    }
+
+    return $RequiredTimeZone
 }
 
 function Set-ClaudeWatchTimeZone {
@@ -223,7 +231,8 @@ function Show-Status {
         [bool]$TimeZoneSynced,
         [bool]$TimeZoneChangeFailed,
         [string]$TimeZoneChangedTo,
-        [bool]$TimeZoneEnforced
+        [bool]$TimeZoneEnforced,
+        [bool]$IranHold
     )
 
     [Console]::SetCursorPosition(0, 0)
@@ -267,7 +276,10 @@ function Show-Status {
         Write-StatusLine ('TIME ZONE: {0} - expected {1}' -f $CurrentTimeZone, $TargetTimeZone) Red
     }
 
-    if ($VpnStatus -and -not $TimeZoneEnforced) {
+    if ($VpnStatus -and $TimeZoneEnforced -and $IranHold -and $TimeZoneSynced -and $ClaudeProcesses.Count -eq 0) {
+        Write-StatusLine 'STANDBY: Iran time is restored. Press [T] to prepare New York before opening Claude.' Yellow
+    }
+    elseif ($VpnStatus -and -not $TimeZoneEnforced) {
         Write-StatusLine 'READY: VPN confirmed. Time-zone protection is disabled. You can open Claude.' Green
     }
     elseif ($VpnStatus -and $CurrentTimeZone -eq $RequiredTimeZone) {
@@ -292,7 +304,12 @@ function Show-Status {
     }
 
     Write-StatusLine ''
-    Write-StatusLine 'Options: [K] Kill Claude   [T] Enable/sync time zone   [X] Exit'
+    if ($ClaudeProcesses.Count -eq 0) {
+        Write-StatusLine 'Options: [K] Kill   [T] Prepare New York   [I] Restore Iran   [X] Exit'
+    }
+    else {
+        Write-StatusLine 'Options: [K] Kill   [T] Prepare New York   [X] Exit'
+    }
     Write-StatusLine 'Monitor keeps refreshing automatically.'
 }
 
@@ -332,8 +349,10 @@ function Invoke-SelfTest {
     if (Test-ClaudeProcess $otherSample) { throw 'Unrelated process detection failed.' }
     if (-not (Test-VpnAdapter $vpnSample)) { throw 'VPN adapter detection failed.' }
     if (Test-VpnAdapter $ethernetSample) { throw 'Unrelated adapter detection failed.' }
-    if ((Get-TargetTimeZone 'Connected: Test VPN') -ne $RequiredTimeZone) { throw 'VPN time-zone target failed.' }
-    if ((Get-TargetTimeZone $null) -ne $HomeTimeZone) { throw 'Disconnected time-zone target failed.' }
+    if ((Get-TargetTimeZone 'Connected: Test VPN' $false $false) -ne $RequiredTimeZone) { throw 'VPN time-zone target failed.' }
+    if ((Get-TargetTimeZone 'Connected: Test VPN' $true $false) -ne $HomeTimeZone) { throw 'Iran hold target failed.' }
+    if ((Get-TargetTimeZone 'Connected: Test VPN' $true $true) -ne $RequiredTimeZone) { throw 'Claude release of Iran hold failed.' }
+    if ((Get-TargetTimeZone $null $false $false) -ne $HomeTimeZone) { throw 'Disconnected time-zone target failed.' }
     if (-not (Get-TimeZone -ListAvailable | Where-Object { $_.Id -eq $RequiredTimeZone })) { throw 'New York time-zone ID is unavailable.' }
     if (-not (Get-TimeZone -ListAvailable | Where-Object { $_.Id -eq $HomeTimeZone })) { throw 'Tehran time-zone ID is unavailable.' }
 
@@ -353,6 +372,7 @@ $timeZoneAttemptedFor = $null
 $timeZoneChangedTo = $null
 $timeZoneChangeFailed = $false
 $timeZoneEnforcement = -not $NoTimeZone
+$iranHold = $false
 
 try {
     [Console]::Clear()
@@ -364,7 +384,11 @@ try {
         $autoKilled = $false
         $autoKillReason = $null
         $currentTimeZone = (Get-TimeZone).Id
-        $targetTimeZone = Get-TargetTimeZone $vpnStatus
+        if ($claudeProcesses.Count -gt 0) {
+            $iranHold = $false
+        }
+
+        $targetTimeZone = Get-TargetTimeZone $vpnStatus $iranHold ($claudeProcesses.Count -gt 0)
         $timeZoneSynced = ($currentTimeZone -eq $targetTimeZone)
 
         if ($timeZoneSynced) {
@@ -428,7 +452,7 @@ try {
             -AutoKillReason $autoKillReason -CurrentTimeZone $currentTimeZone `
             -TargetTimeZone $targetTimeZone -TimeZoneSynced $timeZoneSynced `
             -TimeZoneChangeFailed $timeZoneChangeFailed -TimeZoneChangedTo $timeZoneChangedTo `
-            -TimeZoneEnforced $timeZoneEnforcement
+            -TimeZoneEnforced $timeZoneEnforcement -IranHold $iranHold
 
         $deadline = (Get-Date).AddSeconds($RefreshSeconds)
         :waitLoop while ((Get-Date) -lt $deadline) {
@@ -441,8 +465,18 @@ try {
                     }
                     'T' {
                         $timeZoneEnforcement = $true
+                        $iranHold = $false
                         $timeZoneAttemptedFor = $null
                         $timeZoneChangedTo = $null
+                        break waitLoop
+                    }
+                    'I' {
+                        if ($claudeProcesses.Count -eq 0) {
+                            $timeZoneEnforcement = $true
+                            $iranHold = $true
+                            $timeZoneAttemptedFor = $null
+                            $timeZoneChangedTo = $null
+                        }
                         break waitLoop
                     }
                     'X' {
