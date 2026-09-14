@@ -110,6 +110,14 @@ target_timezone_for_state() {
     esac
 }
 
+timezone_action_for_authorization() {
+    case "$1" in
+        true) printf 'change' ;;
+        false) printf 'prompt' ;;
+        *) return 1 ;;
+    esac
+}
+
 update_vpn_state() {
     local raw_connected="$1"
 
@@ -136,23 +144,33 @@ update_vpn_state() {
 set_timezone() {
     local target_timezone="$1"
     local target_name="$2"
-    local change_status change_output
+    local change_output changed_timezone attempt
 
     # Leave the alternate screen so macOS can show sudo's password prompt.
     printf '\033[?25h\033[?1049l\n'
-    printf 'The network state requires the %s time zone.\n' "$target_name"
+    printf 'The current Claude Watch state requires the %s time zone.\n' "$target_name"
     printf 'Enter your Mac administrator password to change it to %s.\n' "$target_timezone"
 
     change_output=$(sudo /usr/sbin/systemsetup -settimezone "$target_timezone" 2>&1)
-    change_status=$?
+    changed_timezone=''
+    for attempt in 1 2 3 4 5; do
+        changed_timezone=$(get_timezone)
+        [[ "$changed_timezone" == "$target_timezone" ]] && break
+        sleep 0.2
+    done
 
-    if [[ $change_status -ne 0 ]]; then
+    # systemsetup can emit Error:-99 or return a non-zero status even though
+    # macOS applied the requested time zone. The observed system state is the
+    # authoritative result.
+    if [[ "$changed_timezone" != "$target_timezone" ]]; then
         printf 'Time-zone change failed.\n'
-        [[ -n "$change_output" ]] && printf '%s\n' "$change_output"
+        if [[ -n "$change_output" ]]; then
+            printf '%s\n' "$change_output"
+        fi
     fi
 
     printf '\033[?1049h\033[2J\033[H\033[?25l'
-    [[ $change_status -eq 0 && "$(get_timezone)" == "$target_timezone" ]]
+    [[ "$changed_timezone" == "$target_timezone" ]]
 }
 
 request_timezone_action() {
@@ -170,6 +188,7 @@ request_timezone_action() {
     printf '[c] Change the time zone (administrator password required)\n'
     printf '[s] Skip time-zone protection for this session (no sudo)\n'
     printf '[x] Exit Claude Watch\n\n'
+    printf 'Choosing Change once enables automatic corrections for this monitor session.\n\n'
 
     if [[ -t 0 ]]; then
         IFS= read -r -p 'Choice [c/s/x]: ' choice
@@ -207,7 +226,12 @@ invoke_self_test() {
     [[ "$(target_timezone_for_state connected true false)" == "$HOME_TIMEZONE" ]] || return 1
     [[ "$(target_timezone_for_state connected true true)" == "$REQUIRED_TIMEZONE" ]] || return 1
     [[ "$(target_timezone_for_state disconnected false false)" == "$HOME_TIMEZONE" ]] || return 1
+    [[ "$(target_timezone_for_state disconnected true false)" == "$HOME_TIMEZONE" ]] || return 1
+    [[ "$(target_timezone_for_state disconnected true true)" == "$HOME_TIMEZONE" ]] || return 1
     target_timezone_for_state unknown false false >/dev/null 2>&1 && return 1
+    [[ "$(timezone_action_for_authorization false)" == 'prompt' ]] || return 1
+    [[ "$(timezone_action_for_authorization true)" == 'change' ]] || return 1
+    timezone_action_for_authorization unknown >/dev/null 2>&1 && return 1
     [[ -n "$(get_timezone)" ]] || return 1
     [[ -e "/usr/share/zoneinfo/$REQUIRED_TIMEZONE" ]] || return 1
     [[ -e "/usr/share/zoneinfo/$HOME_TIMEZONE" ]] || return 1
@@ -255,6 +279,7 @@ printf '\033[?1049h\033[2J\033[H\033[?25l'
 timezone_attempted_for=''
 timezone_changed_to=''
 timezone_change_failed=false
+timezone_change_authorized=false
 vpn_state='unknown'
 vpn_misses=0
 vpn_grace_until=0
@@ -320,7 +345,10 @@ while true; do
     # for the current session and guarantees that sudo will not be called.
     if [[ "$timezone_enforcement" == true && "$timezone_target_known" == true && "$timezone_synced" == false && "$timezone_attempted_for" != "$target_timezone" ]]; then
         timezone_attempted_for="$target_timezone"
-        request_timezone_action "$target_timezone" "$target_timezone_name" "$timezone"
+        timezone_action=$(timezone_action_for_authorization "$timezone_change_authorized")
+        if [[ "$timezone_action" == 'prompt' ]]; then
+            request_timezone_action "$target_timezone" "$target_timezone_name" "$timezone"
+        fi
         case "$timezone_action" in
             skip)
                 timezone_enforcement=false
@@ -330,6 +358,9 @@ while true; do
                 cleanup
                 ;;
             change)
+                # One explicit approval applies to automatic corrections for
+                # the remainder of this monitor session.
+                timezone_change_authorized=true
                 if [[ -n "$pids" ]]; then
                     kill_claude
                     auto_killed=true
@@ -408,7 +439,13 @@ while true; do
         printf '\033[2K%b\n' "${RED}${BOLD}TIME ZONE: ${timezone:-Unknown} — expected ${target_timezone}${RESET}"
     fi
 
-    if [[ "$vpn_connected" == true && "$timezone_enforcement" == true && "$iran_hold" == true && "$timezone_synced" == true && -z "$pids" ]]; then
+    if [[ "$timezone_change_failed" == true ]]; then
+        if [[ "$target_timezone" == "$HOME_TIMEZONE" && -z "$pids" ]]; then
+            printf '\033[2K%b\n' "${RED}${BOLD}Time zone change failed. Press [i] to retry restoring Iran.${RESET}"
+        else
+            printf '\033[2K%b\n' "${RED}${BOLD}Time zone change failed. Claude remains blocked; press [t] to retry.${RESET}"
+        fi
+    elif [[ "$vpn_connected" == true && "$timezone_enforcement" == true && "$iran_hold" == true && "$timezone_synced" == true && -z "$pids" ]]; then
         printf '\033[2K%b\n' "${YELLOW}${BOLD}STANDBY: Iran time is restored. Press [t] to prepare New York before opening Claude.${RESET}"
     elif [[ "$vpn_connected" == true && "$timezone_enforcement" == false ]]; then
         printf '\033[2K%b\n' "${GREEN}${BOLD}READY: VPN confirmed. Time-zone protection is disabled. You can open Claude.${RESET}"
@@ -422,8 +459,6 @@ while true; do
         printf '\033[2K%b\n' "${RED}${BOLD}SAFE: VPN is disconnected. Claude remains blocked.${RESET}"
     elif [[ "$vpn_connected" == false && "$timezone_synced" == true ]]; then
         printf '\033[2K%b\n' "${RED}${BOLD}SAFE: Time zone is Tehran. Claude remains blocked until VPN connects.${RESET}"
-    elif [[ "$timezone_change_failed" == true ]]; then
-        printf '\033[2K%b\n' "${RED}${BOLD}Time zone change failed. Claude remains blocked; press [t] to retry.${RESET}"
     else
         printf '\033[2K\n'
     fi
