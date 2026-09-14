@@ -61,6 +61,16 @@ function Get-TargetTimeZone {
     return $RequiredTimeZone
 }
 
+function Get-TimeZoneMismatchAction {
+    param([bool]$Authorized)
+
+    if ($Authorized) {
+        return 'Change'
+    }
+
+    return 'Prompt'
+}
+
 function Set-ClaudeWatchTimeZone {
     param(
         [Parameter(Mandatory = $true)]
@@ -79,18 +89,28 @@ function Set-ClaudeWatchTimeZone {
             $escapedId = $TimeZoneId.Replace("'", "''")
             $command = "Set-TimeZone -Id '$escapedId' -ErrorAction Stop"
             $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
-            $process = Start-Process -FilePath powershell.exe -Verb RunAs -Wait -PassThru `
+            Start-Process -FilePath powershell.exe -Verb RunAs -Wait `
                 -ArgumentList "-NoProfile -EncodedCommand $encodedCommand" -ErrorAction Stop
-            if ($process.ExitCode -ne 0) {
-                return $false
+        }
+    }
+    catch {}
+
+    # A command or elevation process can report failure after Windows has
+    # already applied the requested setting. Trust the verified system state.
+    foreach ($attempt in 1..5) {
+        try {
+            if ((Get-TimeZone -ErrorAction Stop).Id -eq $TimeZoneId) {
+                return $true
             }
         }
+        catch {}
 
-        return ((Get-TimeZone -ErrorAction Stop).Id -eq $TimeZoneId)
+        if ($attempt -lt 5) {
+            Start-Sleep -Milliseconds 200
+        }
     }
-    catch {
-        return $false
-    }
+
+    return $false
 }
 
 function Request-TimeZoneAction {
@@ -116,6 +136,8 @@ function Request-TimeZoneAction {
         Write-Host '[C] Change the time zone (Windows UAC approval required)'
         Write-Host '[S] Skip time-zone protection for this session (no elevation)'
         Write-Host '[X] Exit Claude Watch'
+        Write-Host ''
+        Write-Host 'Choosing Change once enables automatic corrections for this monitor session.'
         Write-Host ''
         $choice = Read-Host 'Choice [C/S/X]'
     }
@@ -276,7 +298,15 @@ function Show-Status {
         Write-StatusLine ('TIME ZONE: {0} - expected {1}' -f $CurrentTimeZone, $TargetTimeZone) Red
     }
 
-    if ($VpnStatus -and $TimeZoneEnforced -and $IranHold -and $TimeZoneSynced -and $ClaudeProcesses.Count -eq 0) {
+    if ($TimeZoneChangeFailed) {
+        if ($TargetTimeZone -eq $HomeTimeZone -and $ClaudeProcesses.Count -eq 0) {
+            Write-StatusLine 'Time zone change failed. Press [I] to retry restoring Iran.' Red
+        }
+        else {
+            Write-StatusLine 'Time zone change failed. Claude remains blocked; press [T] to retry.' Red
+        }
+    }
+    elseif ($VpnStatus -and $TimeZoneEnforced -and $IranHold -and $TimeZoneSynced -and $ClaudeProcesses.Count -eq 0) {
         Write-StatusLine 'STANDBY: Iran time is restored. Press [T] to prepare New York before opening Claude.' Yellow
     }
     elseif ($VpnStatus -and -not $TimeZoneEnforced) {
@@ -295,9 +325,6 @@ function Show-Status {
     }
     elseif (-not $VpnStatus -and $TimeZoneSynced) {
         Write-StatusLine 'SAFE: Time zone is Tehran. Claude remains blocked until VPN connects.' Red
-    }
-    elseif ($TimeZoneChangeFailed) {
-        Write-StatusLine 'Time zone change failed. Claude remains blocked; press [T] to retry.' Red
     }
     else {
         Write-StatusLine ''
@@ -353,6 +380,10 @@ function Invoke-SelfTest {
     if ((Get-TargetTimeZone 'Connected: Test VPN' $true $false) -ne $HomeTimeZone) { throw 'Iran hold target failed.' }
     if ((Get-TargetTimeZone 'Connected: Test VPN' $true $true) -ne $RequiredTimeZone) { throw 'Claude release of Iran hold failed.' }
     if ((Get-TargetTimeZone $null $false $false) -ne $HomeTimeZone) { throw 'Disconnected time-zone target failed.' }
+    if ((Get-TargetTimeZone $null $true $false) -ne $HomeTimeZone) { throw 'Disconnected Iran hold target failed.' }
+    if ((Get-TargetTimeZone $null $true $true) -ne $HomeTimeZone) { throw 'Disconnected Claude target failed.' }
+    if ((Get-TimeZoneMismatchAction $false) -ne 'Prompt') { throw 'Initial time-zone prompt action failed.' }
+    if ((Get-TimeZoneMismatchAction $true) -ne 'Change') { throw 'Authorized automatic time-zone action failed.' }
     if (-not (Get-TimeZone -ListAvailable | Where-Object { $_.Id -eq $RequiredTimeZone })) { throw 'New York time-zone ID is unavailable.' }
     if (-not (Get-TimeZone -ListAvailable | Where-Object { $_.Id -eq $HomeTimeZone })) { throw 'Tehran time-zone ID is unavailable.' }
 
@@ -371,6 +402,7 @@ $exitRequested = $false
 $timeZoneAttemptedFor = $null
 $timeZoneChangedTo = $null
 $timeZoneChangeFailed = $false
+$timeZoneChangeAuthorized = $false
 $timeZoneEnforcement = -not $NoTimeZone
 $iranHold = $false
 
@@ -405,7 +437,10 @@ try {
 
         if ($timeZoneEnforcement -and -not $timeZoneSynced -and $timeZoneAttemptedFor -ne $targetTimeZone) {
             $timeZoneAttemptedFor = $targetTimeZone
-            $timeZoneAction = Request-TimeZoneAction -CurrentTimeZone $currentTimeZone -TargetTimeZone $targetTimeZone
+            $timeZoneAction = Get-TimeZoneMismatchAction $timeZoneChangeAuthorized
+            if ($timeZoneAction -eq 'Prompt') {
+                $timeZoneAction = Request-TimeZoneAction -CurrentTimeZone $currentTimeZone -TargetTimeZone $targetTimeZone
+            }
             switch ($timeZoneAction) {
                 'Skip' {
                     $timeZoneEnforcement = $false
@@ -415,6 +450,9 @@ try {
                     $exitRequested = $true
                 }
                 'Change' {
+                    # One explicit approval applies to automatic corrections
+                    # for the remainder of this monitor session.
+                    $timeZoneChangeAuthorized = $true
                     if ($claudeProcesses.Count -gt 0) {
                         Stop-ClaudeProcesses
                         $autoKilled = $true

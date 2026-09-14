@@ -68,16 +68,19 @@ The execution-policy option applies only to that invocation and does not change 
 
 ## Time-zone safety
 
-Claude Watch keeps the system in one of two explicit states:
+Claude Watch keeps the system in one of three explicit states:
 
-| VPN | Required time zone | Claude |
-| --- | --- | --- |
-| Connected | New York (`America/New_York` on macOS; `Eastern Standard Time` on Windows) | Allowed |
-| Disconnected | Tehran (`Asia/Tehran` on macOS; `Iran Standard Time` on Windows) | Blocked |
+| VPN | Mode | Required time zone | Claude |
+| --- | --- | --- | --- |
+| Connected | Normal | New York (`America/New_York` on macOS; `Eastern Standard Time` on Windows) | Allowed |
+| Connected | Iran hold requested with `i` | Tehran (`Asia/Tehran` on macOS; `Iran Standard Time` on Windows) | Must remain closed |
+| Disconnected | Safe | Tehran (`Asia/Tehran` on macOS; `Iran Standard Time` on Windows) | Blocked |
 
 Reading the current time zone never requires administrator access. If it already matches the VPN state, Claude Watch continues without requesting elevation. Only when a change is needed does Claude Watch explain why elevated access is required and offer three choices: change it, skip time-zone protection for the current session without elevation, or exit.
 
-Claude is stopped before an approved inconsistent time zone is corrected. If administrator authorization is declined or the change cannot be verified, Claude remains blocked and the monitor offers a manual retry with `t`. Choosing skip disables only the time-zone rules; VPN protection remains active.
+After **Change** is approved once, Claude Watch remembers that choice for the rest of the current monitor session and automatically corrects later VPN-driven time-zone changes. The operating system may still request a password or UAC approval when its authorization expires. A change is considered successful when the actual system time zone matches the requested value, even if the operating-system command also reports a warning.
+
+Claude is stopped before an approved inconsistent time zone is corrected. If administrator authorization is declined or the change cannot be verified, Claude remains blocked and the monitor offers the appropriate retry control: `t` for New York or `i` for Iran. Choosing skip disables only the time-zone rules; VPN protection remains active.
 
 When Claude is closed, pressing `i` restores the Tehran/Iran time zone even if the VPN remains connected. This state is held instead of being immediately changed back. Press `t` to prepare New York time before opening Claude. If Claude starts while Iran time is being held, Claude Watch releases the hold and runs the normal New York safety flow.
 
