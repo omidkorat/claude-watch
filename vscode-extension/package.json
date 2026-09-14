@@ -1,0 +1,92 @@
+{
+  "name": "code-watch",
+  "displayName": "Code Watch (VPN Kill-Switch)",
+  "description": "Freezes the entire VS Code process tree the instant your VPN drops, and resumes automatically once it reconnects — a kill-switch so no extension, terminal, or CLI under VS Code can leak traffic outside the tunnel.",
+  "version": "0.1.0",
+  "publisher": "masniper",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/omidkorat/claude-watch.git"
+  },
+  "keywords": [
+    "vpn",
+    "kill-switch",
+    "cisco anyconnect",
+    "security",
+    "network"
+  ],
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "codeWatch.start",
+        "title": "Code Watch: Start Monitoring"
+      },
+      {
+        "command": "codeWatch.stop",
+        "title": "Code Watch: Stop Monitoring"
+      },
+      {
+        "command": "codeWatch.pauseNow",
+        "title": "Code Watch: Pause VS Code Now"
+      },
+      {
+        "command": "codeWatch.resumeNow",
+        "title": "Code Watch: Resume VS Code Now"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "codeWatch",
+          "title": "Code Watch",
+          "icon": "resources/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "codeWatch": [
+        {
+          "id": "codeWatch.statusView",
+          "name": "Status",
+          "icon": "resources/icon.svg"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Code Watch",
+      "properties": {
+        "codeWatch.autoStart": {
+          "type": "boolean",
+          "default": true,
+          "description": "Start the VPN watcher automatically when VS Code launches."
+        },
+        "codeWatch.appProcessName": {
+          "type": "string",
+          "default": "",
+          "description": "Override the app to watch: the .app bundle name without extension on macOS (e.g. 'Visual Studio Code - Insiders', 'VSCodium'), or the process name without .exe on Windows (e.g. 'Code - Insiders', 'VSCodium'). Leave empty for the stable VS Code default."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "build": "node ./build-scripts/copy-watchers.js && tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.4.0"
+  }
+}
